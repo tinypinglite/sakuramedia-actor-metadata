@@ -38,6 +38,9 @@ def test_package_contains_only_runtime_files(tmp_path):
         manifest = load_manifest_from_dict(json.loads(z.read("manifest.json")))
         assert manifest.plugin_id == PLUGIN_ID
         assert manifest.host_api_version == 6
+        assert manifest.release_api_url == (
+            "https://api.github.com/repos/tinypinglite/sakuramedia-actor-metadata/releases/latest"
+        )
         assert "beautifulsoup4>=4.12,<5" in manifest.dependencies
     assert Path(archive).stat().st_size > 0
 
