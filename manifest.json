@@ -1,0 +1,9 @@
+{
+  "plugin_id": "sakuramedia_actor_metadata",
+  "display_name": "SakuraMedia 女优资料补全",
+  "version": "0.0.1",
+  "host_api_version": 6,
+  "requires_python": ">=3.10,<3.11",
+  "author": "tinypinglite",
+  "dependencies": ["beautifulsoup4>=4.12,<5"]
+}

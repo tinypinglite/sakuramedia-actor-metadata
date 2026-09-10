@@ -1,0 +1,79 @@
+name: Plugin CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: sakuramedia_actor_metadata
+          persist-credentials: false
+
+      - name: Checkout SakuraMedia host
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tinypinglite/sakuramediabe
+          ref: 79b256ac4e351bd5ab0a606f93f0ada44311408c
+          path: host
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Sync host environment
+        working-directory: host
+        # 后端公开仓库未跟踪 uv.lock，从固定提交的 pyproject.toml 创建环境。
+        run: uv sync --all-groups --no-install-project
+
+      - name: Install declared plugin dependencies in host environment
+        run: |
+          host/.venv/bin/python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          manifest = json.loads(Path('sakuramedia_actor_metadata/manifest.json').read_text())
+          subprocess.run(['uv', 'pip', 'install', '--python', 'host/.venv/bin/python', *manifest['dependencies']], check=True)
+          PY
+
+      - name: Lint
+        working-directory: sakuramedia_actor_metadata
+        run: ../host/.venv/bin/ruff check .
+
+      - name: Test without network or business database
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/host
+        run: >
+          host/.venv/bin/python -m pytest
+          "${{ github.workspace }}/sakuramedia_actor_metadata/tests"
+          --confcutdir="${{ github.workspace }}/sakuramedia_actor_metadata/tests"
+          -o addopts= -q
+
+      - name: Build installable plugin
+        run: host/.venv/bin/python sakuramedia_actor_metadata/tools/package_plugin.py
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: actor-metadata-package
+          path: sakuramedia_actor_metadata/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
