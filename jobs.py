@@ -5,15 +5,16 @@ import time
 
 import portalocker
 
+from .settings import PROFILE_FIELDS
 from .sources import MINNANOAV, SourceError, Sources, normalize_fields
 from .state import State
 
 MAX_CONSECUTIVE_NETWORK_ERRORS = 3
 
 
-def missing_fields(snapshot, settings):
+def missing_fields(snapshot):
     valid = normalize_fields(snapshot.values)
-    return [key for key in settings.target_fields if key not in valid]
+    return [key for key in PROFILE_FIELDS if key not in valid]
 
 
 def is_empty_field_value(name, value):
@@ -127,7 +128,7 @@ def process(
             stats["skipped"] += 1
             report_progress()
             continue
-        missing = missing_fields(snapshot, settings)
+        missing = missing_fields(snapshot)
         row["missing_fields"] = missing
         if not missing:
             row.update(status="completed", next_attempt_at=None, reason="complete")
@@ -215,7 +216,7 @@ def process(
             row.update(status="stopped", reason="actor_changed_or_deleted", next_attempt_at=None)
             stats["stopped"] += 1
         else:
-            allowed = writable_fields(latest, missing_fields(latest, settings), owner)
+            allowed = writable_fields(latest, missing_fields(latest), owner)
             patch = {key: value for key, value in updates.items() if key in allowed}
             if patch:
                 if context.actors.patch(latest.actor_id, patch, expected_revision=latest.revision):
@@ -224,7 +225,7 @@ def process(
                 else:
                     outcomes.append("patch_conflict")
                 latest = context.actors.get(snapshot.actor_id)
-            row["missing_fields"] = missing_fields(latest, settings) if latest else missing
+            row["missing_fields"] = missing_fields(latest) if latest else missing
             row["reason"] = ";".join(outcomes) or "no_data"
             if latest and not row["missing_fields"]:
                 row.update(status="completed", next_attempt_at=None, reason="complete")

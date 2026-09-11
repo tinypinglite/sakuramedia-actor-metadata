@@ -23,8 +23,7 @@ def test_registration_and_defaults_do_not_create_data(tmp_path):
 
 
 @pytest.mark.parametrize("config", [
-    {"max_attempts": 0}, {"retry_days": 0}, {"target_fields": []},
-    {"target_fields": ["cup", "cup"]}, {"target_fields": ["avatar_url"]},
+    {"max_attempts": 0}, {"retry_days": 0},
     {"batch_size": 100},
 ])
 def test_invalid_configuration_rejected(config):
@@ -46,7 +45,7 @@ def test_package_contains_only_runtime_files(tmp_path):
 
 
 def test_packaged_plugin_loads_with_host_loader(tmp_path):
-    from src.plugins.loader import check_plugin_dir
+    from src.plugins.loader import check_plugin_dir, load_plugin_settings_model
 
     archive = build(tmp_path)
     destination = tmp_path / PLUGIN_ID
@@ -55,9 +54,26 @@ def test_packaged_plugin_loads_with_host_loader(tmp_path):
     registration = check_plugin_dir(plugin_dir=destination)
     assert registration.plugin_id == PLUGIN_ID
     assert registration.jobs[0].manual_trigger_allowed
+    model = load_plugin_settings_model(destination)
+    assert model.model_json_schema() == Settings.model_json_schema()
 
 
 def test_upgrade_ignores_retired_mapping_without_exposing_it(tmp_path):
     registration = register(PluginContext(PLUGIN_ID, {"javbus_mapping": {"a": "/star/abc"}}, tmp_path))
     assert registration.jobs[0].task_key == PLUGIN_ID
     assert "javbus_mapping" not in Settings.model_json_schema()["properties"]
+
+
+def test_settings_schema_and_retired_field_configuration():
+    from sakuramedia_actor_metadata import Settings as ExportedSettings
+
+    assert ExportedSettings is Settings
+    config = Settings.model_validate({"target_fields": ["cup"], "retry_days": 5})
+    assert config.retry_days == 5
+    assert "target_fields" not in config.model_dump()
+    schema = Settings.model_json_schema()
+    assert set(schema["properties"]) == {
+        "retry_days", "max_attempts", "subscribed_only",
+        "request_interval_seconds", "timeout_seconds",
+    }
+    assert schema["properties"]["retry_days"]["title"] == "重试间隔（天）"

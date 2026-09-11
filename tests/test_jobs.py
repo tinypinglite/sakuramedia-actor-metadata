@@ -14,6 +14,8 @@ from src.plugins.types import ActorPage, ActorSnapshot, MoviePage, MovieSnapshot
 def actor(actor_id=1, **values):
     return ActorSnapshot(actor_id, 0, {
         "javdb_id": f"id{actor_id}", "name": "演员", "alias_name": "", "gender": 1,
+        "birthday": "1990-01-01", "bust_cm": 85, "waist_cm": 60,
+        "hips_cm": 88, "birthplace": "東京都", "blood_type": "A",
         **values,
     }, {})
 
@@ -89,7 +91,7 @@ class Sources:
 @pytest.fixture
 def setup(tmp_path):
     ctx = SimpleNamespace(plugin_id="demo", actors=Actors([actor()]), movies=Movies())
-    return ctx, State(tmp_path / "state.sqlite3"), Settings(target_fields=("height_cm", "cup"))
+    return ctx, State(tmp_path / "state.sqlite3"), Settings()
 
 
 def test_complete_stops_forever_and_does_not_fetch_second_source(setup):
@@ -106,8 +108,8 @@ def test_complete_stops_forever_and_does_not_fetch_second_source(setup):
 
 def test_unknown_gender_is_written_from_javdb(setup):
     ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0)])
-    settings = Settings(target_fields=("gender",))
+    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
+    settings = Settings()
     source = Sources(Profile({"gender": 1}, ref="javdb"))
 
     stats = process(ctx, settings, state, source, now=lambda: 0)
@@ -119,8 +121,8 @@ def test_unknown_gender_is_written_from_javdb(setup):
 
 def test_minnanoav_gender_fills_when_javdb_is_unknown(setup):
     ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0)])
-    settings = Settings(target_fields=("gender",))
+    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
+    settings = Settings()
     source = Sources(Profile(), Profile({"gender": 1}, ref="/actress1.html"))
 
     stats = process(ctx, settings, state, source, now=lambda: 0)
@@ -132,8 +134,8 @@ def test_minnanoav_gender_fills_when_javdb_is_unknown(setup):
 
 def test_javdb_gender_wins_over_minnanoav_inference(setup):
     ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0)])
-    settings = Settings(target_fields=("gender",))
+    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
+    settings = Settings()
     source = Sources(Profile({"gender": 2}), Profile({"gender": 1}))
 
     process(ctx, settings, state, source, now=lambda: 0)
@@ -144,7 +146,7 @@ def test_javdb_gender_wins_over_minnanoav_inference(setup):
 def test_javdb_male_does_not_use_minnanoav_fallback(setup):
     ctx, state, _ = setup
     ctx.actors = Actors([actor(gender=0)])
-    settings = Settings(target_fields=("gender", "height_cm"))
+    settings = Settings()
     source = Sources(
         Profile({"gender": 2}),
         Profile({"gender": 1, "height_cm": 165}),
@@ -232,7 +234,7 @@ def test_run_writes_task_log_stages(monkeypatch, tmp_path):
     source = Sources(Profile({"height_cm": 160, "cup": "E"}, ref="javdb"))
     monkeypatch.setattr("sakuramedia_actor_metadata.jobs.Sources", lambda _: source)
 
-    run(context, Settings(target_fields=("height_cm", "cup")), None)
+    run(context, Settings(), None)
 
     assert any(args[0] == "女优资料补全开始" for args in logs)
     assert any(args[0] == "待扫描演员数 = {}" for args in logs)
@@ -530,3 +532,14 @@ def test_local_slash_aliases_reach_source(setup):
             return Profile({"cup": "F"})
 
     assert process(ctx, settings, state, CheckingSources(), now=lambda: 0)["updated"] == 1
+
+
+def test_all_profile_fields_are_fetched_and_written(setup):
+    ctx, state, settings = setup
+    values = dict(birthday="1990-01-01", height_cm=160, bust_cm=85,
+                  waist_cm=60, hips_cm=88, cup="E", birthplace="東京都",
+                  blood_type="A", gender=1)
+    ctx.actors = Actors([actor(**dict.fromkeys(values))])
+    stats = process(ctx, settings, state, Sources(Profile(values)), now=lambda: 0)
+    assert ctx.actors.patches == [values]
+    assert stats["completed"] == 1
