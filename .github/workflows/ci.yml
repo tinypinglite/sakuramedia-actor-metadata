@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tinypinglite/sakuramediabe
-          ref: 79b256ac4e351bd5ab0a606f93f0ada44311408c
+          ref: c2728c2f3c4c25636f42a497d3cf55648db854f0
           path: host
           persist-credentials: false
 
