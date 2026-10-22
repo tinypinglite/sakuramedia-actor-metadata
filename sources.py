@@ -65,34 +65,9 @@ def normalize_fields(values):
             value = value.upper()
             if re.fullmatch(r"[A-Z]{1,3}", value):
                 result[key] = value
-        elif key == "gender":
-            if value in {"1", "female", "女"}:
-                result[key] = 1
-            elif value in {"2", "male", "男"}:
-                result[key] = 2
         elif len(value) <= 255:
             result[key] = value
     return result
-
-
-def map_javdb_gender(raw_gender):
-    """将 JavDB 原始值映射为本地枚举：未知不返回，女性 1，男性 2。"""
-    if raw_gender is None or isinstance(raw_gender, bool):
-        return None
-    if isinstance(raw_gender, str):
-        normalized_gender = raw_gender.strip().lower()
-        if normalized_gender in {"female", "女"}:
-            return 1
-        if normalized_gender in {"male", "男"}:
-            return 2
-        if normalized_gender not in {"0", "1"}:
-            return None
-        raw_gender = int(normalized_gender)
-    if raw_gender == 0:
-        return 1
-    if raw_gender == 1:
-        return 2
-    return None
 
 
 def unqualified_name(value):
@@ -146,8 +121,7 @@ def parse_minnanoav(html, ref):
         values["birthday"] = "{:04d}-{:02d}-{:02d}".format(*map(int, birthday.groups()))
     values["birthplace"] = rows.get("出身地")
     values["blood_type"] = rows.get("血液型")
-    # 资料页位于 MinnanoAV 的 actress 目录；身份校验在 checked() 中完成。
-    values["gender"] = 1
+    # 性别由宿主从影片元数据维护；MinnanoAV 只提供女优资料字段。
     return Profile(normalize_fields(values), tuple(n for n in names if n), ref)
 
 
@@ -199,10 +173,7 @@ class Sources:
         names = [actor.get("name"), actor.get("name_zht")]
         names += re.split(r"[,，、;；/／]", actor.get("other_name") or "")
         names = tuple(dict.fromkeys(n.strip() for n in names if isinstance(n, str) and n.strip()))
-        values = {key: actor.get(key) for key in PROFILE_FIELDS if key != "gender"}
-        gender = map_javdb_gender(actor.get("gender"))
-        if gender is not None:
-            values["gender"] = gender
+        values = {key: actor.get(key) for key in PROFILE_FIELDS}
         for upstream, local in (
             ("height", "height_cm"), ("bust", "bust_cm"),
             ("waist", "waist_cm"), ("hips", "hips_cm"),

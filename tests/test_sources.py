@@ -6,7 +6,6 @@ from sakuramedia_actor_metadata.settings import Settings
 from sakuramedia_actor_metadata.sources import (
     SourceError,
     Sources,
-    map_javdb_gender,
     normalize_fields,
     parse_minnanoav,
 )
@@ -43,17 +42,6 @@ def test_normalization_rejects_unknown_and_invalid_values():
                              "birthday": "1990-08-14", "cup": "e"}) == {
         "birthday": "1990-08-14", "height_cm": 163, "cup": "E", "blood_type": "AB",
     }
-    assert normalize_fields({"gender": 0}) == {}
-    assert normalize_fields({"gender": 1}) == {"gender": 1}
-    assert normalize_fields({"gender": 2}) == {"gender": 2}
-
-
-@pytest.mark.parametrize("raw, expected", [
-    (None, None), (0, 1), (1, 2), ("female", 1), ("male", 2), ("女", 1), ("男", 2),
-    ("unknown", None), (True, None),
-])
-def test_javdb_gender_mapping(raw, expected):
-    assert map_javdb_gender(raw) == expected
 
 
 def test_javdb_business_error_on_http_200(client):
@@ -75,11 +63,11 @@ def test_javdb_fields_and_aliases(client):
     assert "鬼头桃菜" in profile.names
 
 
-def test_javdb_gender_is_mapped_from_explicit_value(client):
+def test_javdb_actor_payload_gender_is_ignored(client):
     mock(client, lambda req: httpx.Response(200, json={"success": 1, "data": {"actor": {
-        "id": "female", "name": "女性", "gender": 0,
+        "id": "male", "name": "男", "gender": 1,
     }}}))
-    assert client.javdb("female").fields["gender"] == 1
+    assert "gender" not in client.javdb("male").fields
 
 
 def test_real_profile_fragment():
@@ -87,23 +75,18 @@ def test_real_profile_fragment():
     result = parse_minnanoav(html, "/actress203126.html")
     assert result.names == ("山手梨愛",)
     assert result.fields == {"birthday": "2000-02-23", "height_cm": 170, "bust_cm": 99,
-                             "waist_cm": 58, "hips_cm": 88, "cup": "I", "birthplace": "福岡県",
-                             "gender": 1}
+                             "waist_cm": 58, "hips_cm": 88, "cup": "I", "birthplace": "福岡県"}
 
 
 def test_alias_and_optional_values():
     html = card(info='<span>別名</span><p>旧名（きゅうめい）</p>')
     result = parse_minnanoav(html, "/actress1.html")
-    assert result.names == ("山手梨愛", "旧名") and result.fields == {"gender": 1}
+    assert result.names == ("山手梨愛", "旧名") and result.fields == {}
     assert parse_minnanoav(card(info='<span>血液型</span><p>AB型</p>'), "").fields == {
-        "blood_type": "AB", "gender": 1,
+        "blood_type": "AB",
     }
-    assert parse_minnanoav(card(info='<span>生年月日</span><p>2000年02月30日</p>'), "").fields == {
-        "gender": 1,
-    }
-    assert parse_minnanoav(card(info='<span>出身地</span><p>非公開</p>'), "").fields == {
-        "gender": 1,
-    }
+    assert parse_minnanoav(card(info='<span>生年月日</span><p>2000年02月30日</p>'), "").fields == {}
+    assert parse_minnanoav(card(info='<span>出身地</span><p>非公開</p>'), "").fields == {}
 
 
 def test_empty_profile_is_retryable_result(client):

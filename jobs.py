@@ -17,13 +17,13 @@ def missing_fields(snapshot):
     return [key for key in PROFILE_FIELDS if key not in valid]
 
 
-def is_empty_field_value(name, value):
-    return value in (None, "") or (name == "gender" and value == 0)
+def is_empty_field_value(value):
+    return value in (None, "")
 
 
 def writable_fields(snapshot, missing, owner):
     # 非空但无效的历史值也不覆盖；需要用户自行清理后明确重新入队。
-    return [key for key in missing if is_empty_field_value(key, snapshot.values.get(key))
+    return [key for key in missing if is_empty_field_value(snapshot.values.get(key))
             and snapshot.owners.get(key) in (None, owner)]
 
 
@@ -163,21 +163,19 @@ def process(
         state.save(row)
         stats["attempted"] += 1
         updates, provenance, outcomes = {}, {}, []
-        javdb_male = False
         aborted = False
         names = [snapshot.values.get("name") or ""]
         names += re.split(r"[,，、;；/／]", snapshot.values.get("alias_name") or "")
         try:
             if javdb_id:
                 profile = sources.javdb(javdb_id)
-                javdb_male = profile.fields.get("gender") == 2
                 names = [*profile.names, *names]
                 outcomes.append("javdb:" + profile.outcome)
                 for key, value in profile.fields.items():
                     if key in writable:
                         updates[key] = value
                         provenance[key] = {"url": profile.ref, "fetched_at": started_at}
-            if not javdb_male and any(key not in updates for key in writable):
+            if any(key not in updates for key in writable):
                 profile = sources.minnanoav(
                     names, row["minnanoav_ref"],
                 )

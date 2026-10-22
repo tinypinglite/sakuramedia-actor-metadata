@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROFILE_FIELDS = (
     "birthday", "height_cm", "bust_cm", "waist_cm", "hips_cm", "cup",
-    "birthplace", "blood_type", "gender",
+    "birthplace", "blood_type",
 )
 
 

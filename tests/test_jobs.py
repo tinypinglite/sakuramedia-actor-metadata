@@ -106,57 +106,17 @@ def test_complete_stops_forever_and_does_not_fetch_second_source(setup):
     assert len(source.calls) == 1
 
 
-def test_unknown_gender_is_written_from_javdb(setup):
+def test_actor_metadata_does_not_write_gender(setup):
     ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
+    ctx.actors = Actors([actor(gender=0, cup=None)])
     settings = Settings()
-    source = Sources(Profile({"gender": 1}, ref="javdb"))
+    source = Sources(Profile({"gender": 1, "cup": "E", "height_cm": 160}, ref="javdb"))
 
     stats = process(ctx, settings, state, source, now=lambda: 0)
 
     assert stats["updated"] == stats["completed"] == 1
-    assert ctx.actors.get(1).values["gender"] == 1
-    assert source.calls == [("javdb", "id1")]
-
-
-def test_minnanoav_gender_fills_when_javdb_is_unknown(setup):
-    ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
-    settings = Settings()
-    source = Sources(Profile(), Profile({"gender": 1}, ref="/actress1.html"))
-
-    stats = process(ctx, settings, state, source, now=lambda: 0)
-
-    assert stats["updated"] == stats["completed"] == 1
-    assert ctx.actors.get(1).values["gender"] == 1
-    assert source.calls == [("javdb", "id1"), ("minnanoav", "")]
-
-
-def test_javdb_gender_wins_over_minnanoav_inference(setup):
-    ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0, height_cm=160, cup="E")])
-    settings = Settings()
-    source = Sources(Profile({"gender": 2}), Profile({"gender": 1}))
-
-    process(ctx, settings, state, source, now=lambda: 0)
-
-    assert ctx.actors.get(1).values["gender"] == 2
-
-
-def test_javdb_male_does_not_use_minnanoav_fallback(setup):
-    ctx, state, _ = setup
-    ctx.actors = Actors([actor(gender=0)])
-    settings = Settings()
-    source = Sources(
-        Profile({"gender": 2}),
-        Profile({"gender": 1, "height_cm": 165}),
-    )
-
-    process(ctx, settings, state, source, now=lambda: 0)
-
-    assert source.calls == [("javdb", "id1")]
-    assert ctx.actors.get(1).values["gender"] == 2
-    assert ctx.actors.get(1).values.get("height_cm") is None
+    assert ctx.actors.get(1).values["gender"] == 0
+    assert ctx.actors.get(1).values["cup"] == "E"
 
 
 def test_three_rounds_three_days_partial_progress_does_not_reset(setup):
@@ -541,5 +501,6 @@ def test_all_profile_fields_are_fetched_and_written(setup):
                   blood_type="A", gender=1)
     ctx.actors = Actors([actor(**dict.fromkeys(values))])
     stats = process(ctx, settings, state, Sources(Profile(values)), now=lambda: 0)
-    assert ctx.actors.patches == [values]
+    expected_patch = {key: value for key, value in values.items() if key != "gender"}
+    assert ctx.actors.patches == [expected_patch]
     assert stats["completed"] == 1
