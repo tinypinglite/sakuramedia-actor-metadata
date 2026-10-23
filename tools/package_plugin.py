@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
     "manifest.json", "__init__.py", "plugin.py", "settings.py", "sources.py",
-    "jobs.py", "state.py", "README.md",
+    "index.py", "actress_index.json", "jobs.py", "state.py", "README.md",
 )
 
 

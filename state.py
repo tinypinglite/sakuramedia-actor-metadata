@@ -75,3 +75,17 @@ class State:
                 json.dumps(row["missing_fields"]), row["reason"], row["minnanoav_ref"],
                 json.dumps(row["sources"], ensure_ascii=False), row["actor_id"],
             ))
+
+    def references(self):
+        """只读快照：用于判断这轮是否需要先建索引，不插入新行。"""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT actor_id, status, attempts, next_attempt_at, minnanoav_ref FROM actors"
+            )
+            return {
+                row["actor_id"]: (
+                    row["status"], row["attempts"],
+                    row["next_attempt_at"], row["minnanoav_ref"],
+                )
+                for row in rows
+            }

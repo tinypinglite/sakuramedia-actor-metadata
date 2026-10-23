@@ -5,6 +5,7 @@ import time
 
 import portalocker
 
+from .index import ActressIndex, seed_bundled_index
 from .settings import PROFILE_FIELDS
 from .sources import MINNANOAV, SourceError, Sources, normalize_fields
 from .state import State
@@ -25,6 +26,33 @@ def writable_fields(snapshot, missing, owner):
     # 非空但无效的历史值也不覆盖；需要用户自行清理后明确重新入队。
     return [key for key in missing if is_empty_field_value(snapshot.values.get(key))
             and snapshot.owners.get(key) in (None, owner)]
+
+
+def needs_minnanoav_lookup(state, settings, snapshots, owner):
+    """这轮是否有演员需要 MinnanoAV；有就先把列表索引准备好。
+
+    不看重试窗口：索引是站点级缓存，提前建好，等演员到期时直接用。
+    """
+    references = state.references()
+    for snapshot in snapshots:
+        if snapshot.values.get("gender") == 2:
+            continue
+        if settings.subscribed_only and not snapshot.values.get("is_subscribed"):
+            continue
+        missing = missing_fields(snapshot)
+        if not missing or not writable_fields(snapshot, missing, owner):
+            continue
+        reference = references.get(snapshot.actor_id)
+        if reference is not None:
+            status, attempts, _next_attempt_at, ref = reference
+            if status in {"completed", "stopped"}:
+                continue
+            if attempts >= settings.max_attempts:
+                continue
+            if ref:
+                continue
+        return True
+    return False
 
 
 def iter_actor_snapshot_batches(context):
@@ -77,6 +105,7 @@ def process(
     *,
     now=None,
     logger=None,
+    index=None,
 ):
     now = time.time if now is None else now
     owner = f"plugin:{context.plugin_id}"
@@ -106,6 +135,11 @@ def process(
 
     if actor_snapshots:
         actor_snapshots = prioritize_actor_snapshots(context, actor_snapshots, reporter)
+
+    if index is not None and needs_minnanoav_lookup(
+        state, settings, actor_snapshots, owner
+    ):
+        index.ensure(sources, reporter=reporter, logger=logger, now=now())
 
     if reporter is not None:
         reporter.progress_callback({
@@ -177,7 +211,7 @@ def process(
                         provenance[key] = {"url": profile.ref, "fetched_at": started_at}
             if any(key not in updates for key in writable):
                 profile = sources.minnanoav(
-                    names, row["minnanoav_ref"],
+                    names, row["minnanoav_ref"], index=index,
                 )
                 outcomes.append("minnanoav:" + profile.outcome)
                 if profile.outcome == "ok":
@@ -187,7 +221,7 @@ def process(
                             updates[key] = value
                             provenance[key] = {"url": MINNANOAV + profile.ref,
                                                "fetched_at": started_at}
-                elif profile.outcome in {"not_found", "identity_mismatch"}:
+                elif profile.outcome in {"not_found", "identity_mismatch", "ambiguous"}:
                     row["minnanoav_ref"] = ""
         except SourceError as exc:
             outcomes.append(str(exc))
@@ -242,18 +276,23 @@ def process(
     return stats
 
 
-def run(context, settings, reporter):
+def run(context, settings, reporter, *, index=None):
     logger = context.get_task_logger("actor-metadata")
     logger.info("女优资料补全开始")
     with portalocker.Lock(str(context.data_dir / "actor_metadata.lock"), mode="a", timeout=0):
         state = State(context.data_dir / "actor_metadata.sqlite3")
         if state.requeued_count:
             logger.info("资料来源升级，已重新入队 {} 位未补齐演员", state.requeued_count)
+        if index is None:
+            index_path = context.data_dir / "actress_index.sqlite3"
+            if seed_bundled_index(index_path):
+                logger.info("已载入插件内置女优索引")
+            index = ActressIndex(index_path)
         sources = Sources(settings)
         try:
             stats = process(
                 context, settings, state, sources, reporter,
-                logger=logger,
+                logger=logger, index=index,
             )
         finally:
             sources.close()

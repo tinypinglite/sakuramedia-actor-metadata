@@ -88,6 +88,21 @@ class Sources:
         pass
 
 
+class FakeIndex:
+    def __init__(self, refs=()):
+        self.refs = list(refs)
+        self.ensured = False
+
+    def ensure(self, sources, **kwargs):
+        self.ensured = True
+
+    def lookup(self, names):
+        return self.refs
+
+    def remove(self, ref):
+        pass
+
+
 @pytest.fixture
 def setup(tmp_path):
     ctx = SimpleNamespace(plugin_id="demo", actors=Actors([actor()]), movies=Movies())
@@ -194,7 +209,7 @@ def test_run_writes_task_log_stages(monkeypatch, tmp_path):
     source = Sources(Profile({"height_cm": 160, "cup": "E"}, ref="javdb"))
     monkeypatch.setattr("sakuramedia_actor_metadata.jobs.Sources", lambda _: source)
 
-    run(context, Settings(), None)
+    run(context, Settings(), None, index=FakeIndex())
 
     assert any(args[0] == "女优资料补全开始" for args in logs)
     assert any(args[0] == "待扫描演员数 = {}" for args in logs)
@@ -457,7 +472,7 @@ def test_run_not_found_saves_partial_data_and_continues(
             if jid == "id2":
                 data["cup"] = "E"
             return httpx.Response(200, json={"success": 1, "data": {"actor": data}})
-        return httpx.Response(200, text='<h1>AV女優検索結果<span>0 名</span></h1>')
+        return httpx.Response(404)
 
     def make_sources(settings):
         source = HttpSources(settings)
@@ -468,7 +483,7 @@ def test_run_not_found_saves_partial_data_and_continues(
 
     monkeypatch.setattr("sakuramedia_actor_metadata.jobs.Sources", make_sources)
     settings = settings.model_copy(update={"max_attempts": max_attempts})
-    stats = run(ctx, settings, SimpleNamespace(progress_callback=events.append))
+    stats = run(ctx, settings, SimpleNamespace(progress_callback=events.append), index=FakeIndex())
     assert stats["aborted"] == 0 and stats["errors"] == 0
     assert stats["attempted"] == 2 and stats["updated"] == 2 and stats["completed"] == 1
     saved = State(tmp_path / "actor_metadata.sqlite3").get(1, "id1")
@@ -478,7 +493,7 @@ def test_run_not_found_saves_partial_data_and_continues(
     assert "height_cm" in saved["sources"]
     assert events[-1]["current"] == events[-1]["total"] == 2
     seen.clear()
-    assert run(ctx, settings, None)["attempted"] == 0
+    assert run(ctx, settings, None, index=FakeIndex())["attempted"] == 0
     assert seen == []
 
 
@@ -487,7 +502,7 @@ def test_local_slash_aliases_reach_source(setup):
     ctx.actors.rows[1] = actor(name="三上悠亞", alias_name="三上悠亞 / 三上悠亜 / 鬼头桃菜")
 
     class CheckingSources(Sources):
-        def minnanoav(self, names, ref):
+        def minnanoav(self, names, ref, **kwargs):
             assert [n.strip() for n in names] == ["三上悠亞", "三上悠亞", "三上悠亜", "鬼头桃菜"]
             return Profile({"cup": "F"})
 
@@ -504,3 +519,34 @@ def test_all_profile_fields_are_fetched_and_written(setup):
     expected_patch = {key: value for key, value in values.items() if key != "gender"}
     assert ctx.actors.patches == [expected_patch]
     assert stats["completed"] == 1
+
+
+def test_index_is_prepared_only_when_a_lookup_is_needed(setup):
+    ctx, state, settings = setup
+    source = Sources(
+        Profile({"height_cm": 160}),
+        Profile({"cup": "E"}, ref="/actress9.html"),
+    )
+    index = FakeIndex()
+
+    process(ctx, settings, state, source, index=index, now=lambda: 0)
+
+    assert index.ensured is True
+    assert state.get(1, "id1")["status"] == "completed"
+
+
+def test_index_is_not_built_when_the_actor_has_a_cached_ref(setup):
+    ctx, state, settings = setup
+    row = state.get(1, "id1")
+    row["minnanoav_ref"] = "/actress9.html"
+    state.save(row)
+    source = Sources(
+        Profile({"height_cm": 160}),
+        Profile({"cup": "E"}, ref="/actress9.html"),
+    )
+    index = FakeIndex()
+
+    process(ctx, settings, state, source, index=index, now=lambda: 0)
+
+    assert index.ensured is False
+    assert source.calls[-1] == ("minnanoav", "/actress9.html")

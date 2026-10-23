@@ -32,6 +32,26 @@ class Profile:
     outcome: str = "ok"
 
 
+@dataclass(frozen=True)
+class ActressListEntry:
+    ref: str
+    name: str
+    furi: str = ""
+
+
+@dataclass(frozen=True)
+class ActressGroup:
+    code: str
+    label: str
+
+
+@dataclass(frozen=True)
+class ActressListPage:
+    entries: tuple[ActressListEntry, ...]
+    last_page: int
+    total: int = 0
+
+
 def normalize_name(value):
     return "".join(unicodedata.normalize("NFKC", value).casefold().split())
 
@@ -125,6 +145,71 @@ def parse_minnanoav(html, ref):
     return Profile(normalize_fields(values), tuple(n for n in names if n), ref)
 
 
+def parse_actress_groups(html):
+    """解析列表页侧栏的五十音分组链接；同组只保留一次。"""
+    soup = BeautifulSoup(html, "html.parser")
+    groups = []
+    seen = set()
+    for link in soup.select('a[href*="gojuon="]'):
+        match = re.search(r"[?&]gojuon=([a-z]+)", link.get("href") or "")
+        if match is None or match.group(1) in seen:
+            continue
+        code = match.group(1)
+        seen.add(code)
+        groups.append(ActressGroup(code, link.get_text(" ", strip=True) or code))
+    if not groups:
+        raise SourceError("minnanoav:group_markup_missing")
+    return tuple(groups)
+
+
+def _parse_list_total(soup):
+    page_info = soup.select_one(".pagination .page_info")
+    if page_info is not None:
+        match = re.search(r"\(([\d,]+)\s*件\)", page_info.get_text(" ", strip=True))
+        if match:
+            return int(match.group(1).replace(",", ""))
+    heading = soup.select_one("h1")
+    if heading is not None:
+        match = re.search(r"([\d,]+)\s*名", heading.get_text(" ", strip=True))
+        if match:
+            return int(match.group(1).replace(",", ""))
+    return 0
+
+
+def parse_actress_list(html):
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.select_one("table.tbllist.actress")
+    if table is None:
+        raise SourceError("minnanoav:list_markup_missing")
+    entries = []
+    seen = set()
+    for row in table.select("tr"):
+        link = row.select_one("h2.ttl a[href]")
+        if link is None:
+            continue
+        href = (link.get("href") or "").strip().lstrip("/")
+        if not re.fullmatch(r"actress[0-9]+\.html", href):
+            continue
+        ref = "/" + href
+        if ref in seen:
+            continue
+        seen.add(ref)
+        furi_node = row.select_one("p.furi")
+        entries.append(ActressListEntry(
+            ref=ref,
+            name=link.get_text(" ", strip=True),
+            furi=furi_node.get_text(" ", strip=True) if furi_node else "",
+        ))
+    last_page = 1
+    for link in soup.select('a[href*="page="]'):
+        match = re.search(
+            r"actress_list\.php\?[^\"']*?page=([0-9]+)", link.get("href") or ""
+        )
+        if match:
+            last_page = max(last_page, int(match.group(1)))
+    return ActressListPage(tuple(entries), last_page, _parse_list_total(soup))
+
+
 class Sources:
     def __init__(self, settings: Settings):
         self.interval = settings.request_interval_seconds
@@ -181,15 +266,40 @@ class Sources:
             values[local] = actor.get(upstream)
         return Profile(normalize_fields(values), names, url)
 
-    def minnanoav(self, names, ref=""):
-        names = tuple(dict.fromkeys(n.strip() for n in names if n and n.strip()))
-        expected = {normalize_name(n) for n in names}
-        headers = {
+    @staticmethod
+    def _minnanoav_headers():
+        return {
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "accept-language": "ja-JP,ja;q=0.9,en;q=0.7",
             "referer": MINNANOAV + "/",
         }
+
+    def actress_groups(self):
+        response = self._get(
+            f"{MINNANOAV}/actress_list.php", headers=self._minnanoav_headers()
+        )
+        if response is None:
+            raise SourceError("minnanoav:group_list_missing")
+        return parse_actress_groups(response.text)
+
+    def actress_list_page(self, page, *, sort="name", gojuon=""):
+        params = []
+        if gojuon:
+            params.append(f"gojuon={quote(str(gojuon), safe='')}")
+        params.append(f"page={int(page)}")
+        params.append(f"sort={quote(str(sort), safe='')}")
+        url = f"{MINNANOAV}/actress_list.php?" + "&".join(params)
+        response = self._get(url, headers=self._minnanoav_headers())
+        if response is None:
+            return ActressListPage(tuple(), 0)
+        return parse_actress_list(response.text)
+
+    def minnanoav(self, names, ref="", index=None):
+        """资料页直连；没有缓存 ref 或 ref 失效时，只查本地列表索引，不再请求搜索页。"""
+        names = tuple(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+        expected = {normalize_name(n) for n in names}
+        headers = self._minnanoav_headers()
 
         def checked(response):
             actual_ref = minnanoav_ref(str(response.url))
@@ -202,6 +312,7 @@ class Sources:
                 return Profile(outcome="identity_mismatch")
             return profile
 
+        outcome = "not_found"
         if ref:
             if not MINNANOAV_REF.fullmatch(ref):
                 raise SourceError("minnanoav:invalid_mapping")
@@ -210,36 +321,26 @@ class Sources:
                 profile = checked(response)
                 if profile.outcome in {"ok", "empty_profile"}:
                     return profile
-            # 缓存失效时在本轮重新搜索，仍须校验身份。
-        outcome = "not_found"
-        for name in names[:3]:
-            response = self._get(
-                f"{MINNANOAV}/search_result.php?search_scope=actress&search_word={quote(name, safe='')}&search=Go",
-                headers=headers,
-            )
-            if response is None:
-                continue
-            if minnanoav_ref(str(response.url)):
-                profile = checked(response)
-            else:
-                soup = BeautifulSoup(response.text, "html.parser")
-                heading = soup.select_one("h1")
-                if heading is None or "AV女優検索結果" not in heading.get_text():
-                    raise SourceError("minnanoav:search_markup_missing")
-                candidates = {
-                    minnanoav_ref(link["href"])
-                    for link in soup.select("h2.ttl a[href]")
-                    if normalize_name(unqualified_name(link.get_text(" ", strip=True))) == normalize_name(name)
-                } - {""}
-                if len(candidates) > 1:
-                    return Profile(outcome="ambiguous")
-                if not candidates:
-                    continue
-                response = self._get(MINNANOAV + candidates.pop(), headers=headers)
-                if response is None:
-                    continue
-                profile = checked(response)
-            if profile.outcome == "ok":
-                return profile
+                outcome = profile.outcome
+        if index is None:
+            return Profile(outcome=outcome)
+        refs = index.lookup(names)
+        if len(refs) > 1:
+            return Profile(outcome="ambiguous")
+        if not refs:
+            return Profile(outcome=outcome)
+        candidate = refs[0]
+        if candidate == ref:
+            return Profile(outcome=outcome)
+        response = self._get(MINNANOAV + candidate, headers=headers)
+        if response is None:
+            index.remove(candidate)
+            return Profile(outcome="not_found")
+        profile = checked(response)
+        if profile.outcome not in {"ok", "empty_profile"}:
             outcome = profile.outcome
-        return Profile(outcome=outcome)
+            # 名字不一致可能是 JavDB 用了罗马字/中文名，不能据此删掉正确的
+            # 索引 ref；只有资料页 404 才说明映射失效。
+            if profile.outcome != "identity_mismatch":
+                index.remove(candidate)
+        return profile if profile.outcome in {"ok", "empty_profile"} else Profile(outcome=outcome)
