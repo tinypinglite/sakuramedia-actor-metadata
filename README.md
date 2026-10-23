@@ -29,3 +29,9 @@ MinnanoAV 在部分网络环境可能需要通过代理访问；如无法连接�
   "timeout_seconds": 20
 }
 ```
+
+## License
+
+本项目采用 [PolyForm Noncommercial License 1.0.0](./LICENSE)，仅允许非商业用途。
+
+Copyright (C) 2026 tinypinglite
