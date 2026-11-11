@@ -1,16 +1,28 @@
-"""每天筛选到期演员；完成、耗尽次数的演员不再访问来源。"""
+"""每天筛选到期演员；完成、停止的演员不再访问来源。"""
 
 import re
 import time
 
 import portalocker
 
-from .index import ActressIndex, seed_bundled_index
 from .settings import PROFILE_FIELDS
-from .sources import MINNANOAV, SourceError, Sources, normalize_fields
+from .sources import JAVBUS, SourceError, Sources, normalize_fields, normalize_name
 from .state import State
 
 MAX_CONSECUTIVE_NETWORK_ERRORS = 3
+TERMINAL_OUTCOMES = {"not_found", "ambiguous", "identity_mismatch", "empty_profile"}
+
+
+def actor_names(snapshot):
+    names = [snapshot.values.get("name") or ""]
+    names += re.split(r"[,，、;；/／]", snapshot.values.get("alias_name") or "")
+    return tuple(
+        dict.fromkeys(name.strip() for name in names if name and name.strip())
+    )
+
+
+def actor_identity_key(snapshot):
+    return "\x1f".join(normalize_name(name) for name in actor_names(snapshot))
 
 
 def missing_fields(snapshot):
@@ -24,35 +36,12 @@ def is_empty_field_value(value):
 
 def writable_fields(snapshot, missing, owner):
     # 非空但无效的历史值也不覆盖；需要用户自行清理后明确重新入队。
-    return [key for key in missing if is_empty_field_value(snapshot.values.get(key))
-            and snapshot.owners.get(key) in (None, owner)]
-
-
-def needs_minnanoav_lookup(state, settings, snapshots, owner):
-    """这轮是否有演员需要 MinnanoAV；有就先把列表索引准备好。
-
-    不看重试窗口：索引是站点级缓存，提前建好，等演员到期时直接用。
-    """
-    references = state.references()
-    for snapshot in snapshots:
-        if snapshot.values.get("gender") == 2:
-            continue
-        if settings.subscribed_only and not snapshot.values.get("is_subscribed"):
-            continue
-        missing = missing_fields(snapshot)
-        if not missing or not writable_fields(snapshot, missing, owner):
-            continue
-        reference = references.get(snapshot.actor_id)
-        if reference is not None:
-            status, attempts, _next_attempt_at, ref = reference
-            if status in {"completed", "stopped"}:
-                continue
-            if attempts >= settings.max_attempts:
-                continue
-            if ref:
-                continue
-        return True
-    return False
+    return [
+        key
+        for key in missing
+        if is_empty_field_value(snapshot.values.get(key))
+        and snapshot.owners.get(key) in (None, owner)
+    ]
 
 
 def iter_actor_snapshot_batches(context):
@@ -78,9 +67,8 @@ def prioritize_actor_snapshots(context, snapshots, reporter):
             if values["is_collection"]:
                 continue
             for actor in movie.actors:
-                if actor.actor_id not in movie_counts:
-                    continue
-                movie_counts[actor.actor_id] += 1
+                if actor.actor_id in movie_counts:
+                    movie_counts[actor.actor_id] += 1
         scanned_movies += len(page.items)
         if reporter is not None:
             reporter.progress_callback({
@@ -105,7 +93,6 @@ def process(
     *,
     now=None,
     logger=None,
-    index=None,
 ):
     now = time.time if now is None else now
     owner = f"plugin:{context.plugin_id}"
@@ -136,11 +123,6 @@ def process(
     if actor_snapshots:
         actor_snapshots = prioritize_actor_snapshots(context, actor_snapshots, reporter)
 
-    if index is not None and needs_minnanoav_lookup(
-        state, settings, actor_snapshots, owner
-    ):
-        index.ensure(sources, reporter=reporter, logger=logger, now=now())
-
     if reporter is not None:
         reporter.progress_callback({
             "current": 0,
@@ -156,8 +138,9 @@ def process(
             stats["skipped"] += 1
             report_progress()
             continue
-        javdb_id = snapshot.values.get("javdb_id") or ""
-        row = state.get(snapshot.actor_id, javdb_id)
+
+        identity_key = actor_identity_key(snapshot)
+        row = state.get(snapshot.actor_id, identity_key)
         if row["status"] in {"completed", "stopped"}:
             stats["skipped"] += 1
             report_progress()
@@ -171,8 +154,11 @@ def process(
             report_progress()
             continue
         if row["attempts"] >= settings.max_attempts:
-            row.update(status="stopped", next_attempt_at=None,
-                       reason=row["reason"] or "attempt_limit")
+            row.update(
+                status="stopped",
+                next_attempt_at=None,
+                reason=row["reason"] or "attempt_limit",
+            )
             state.save(row)
             stats["stopped"] += 1
             report_progress()
@@ -184,76 +170,94 @@ def process(
             continue
         writable = writable_fields(snapshot, missing, owner)
         if not writable:
-            row.update(status="stopped", next_attempt_at=None, reason="fields_not_writable")
+            row.update(
+                status="stopped",
+                next_attempt_at=None,
+                reason="fields_not_writable",
+            )
             state.save(row)
             stats["stopped"] += 1
             report_progress()
             continue
+
         # 请求前提交次数，进程被终止后也不能绕开上限。
-        row.update(status="waiting", attempts=row["attempts"] + 1,
-                   last_attempt_at=started_at,
-                   next_attempt_at=started_at + settings.retry_days * 86400,
-                   reason="interrupted")
+        row.update(
+            status="waiting",
+            attempts=row["attempts"] + 1,
+            last_attempt_at=started_at,
+            next_attempt_at=started_at + settings.retry_days * 86400,
+            reason="interrupted",
+        )
         state.save(row)
         stats["attempted"] += 1
         updates, provenance, outcomes = {}, {}, []
+        javbus_outcome = ""
         aborted = False
-        names = [snapshot.values.get("name") or ""]
-        names += re.split(r"[,，、;；/／]", snapshot.values.get("alias_name") or "")
+
         try:
-            if javdb_id:
-                profile = sources.javdb(javdb_id)
-                names = [*profile.names, *names]
-                outcomes.append("javdb:" + profile.outcome)
-                for key, value in profile.fields.items():
-                    if key in writable:
-                        updates[key] = value
-                        provenance[key] = {"url": profile.ref, "fetched_at": started_at}
-            if any(key not in updates for key in writable):
-                profile = sources.minnanoav(
-                    names, row["minnanoav_ref"], index=index,
-                )
-                outcomes.append("minnanoav:" + profile.outcome)
-                if profile.outcome == "ok":
-                    row["minnanoav_ref"] = profile.ref
-                    for key, value in profile.fields.items():
-                        if key in writable and key not in updates:
-                            updates[key] = value
-                            provenance[key] = {"url": MINNANOAV + profile.ref,
-                                               "fetched_at": started_at}
-                elif profile.outcome in {"not_found", "identity_mismatch", "ambiguous"}:
-                    row["minnanoav_ref"] = ""
+            profile = sources.javbus(actor_names(snapshot), row["javbus_ref"])
+            javbus_outcome = profile.outcome
+            outcomes.append("javbus:" + profile.outcome)
+            if profile.ref:
+                row["javbus_ref"] = profile.ref
+            elif profile.outcome in TERMINAL_OUTCOMES:
+                row["javbus_ref"] = ""
+            for field_name, value in profile.fields.items():
+                if field_name in writable:
+                    updates[field_name] = value
+                    provenance[field_name] = {
+                        "url": JAVBUS + profile.ref,
+                        "fetched_at": started_at,
+                    }
         except SourceError as exc:
             outcomes.append(str(exc))
             stats["errors"] += 1
             if str(exc).endswith(":network_error"):
                 consecutive_network_errors += 1
                 aborted = consecutive_network_errors >= MAX_CONSECUTIVE_NETWORK_ERRORS
+            elif str(exc).endswith(":verification_required"):
+                aborted = True
             else:
                 consecutive_network_errors = 0
             if logger is not None and str(exc).endswith(":network_error"):
                 logger.warning(
                     "网络请求异常 actor_id={} reason={} consecutive_network_errors={}/{}",
-                    snapshot.actor_id, exc, consecutive_network_errors,
+                    snapshot.actor_id,
+                    exc,
+                    consecutive_network_errors,
                     MAX_CONSECUTIVE_NETWORK_ERRORS,
                 )
             elif logger is not None:
-                logger.warning("来源响应异常 actor_id={} reason={}，继续下一位演员", snapshot.actor_id, exc)
+                logger.warning(
+                    "来源响应异常 actor_id={} reason={}，继续下一位演员",
+                    snapshot.actor_id,
+                    exc,
+                )
         else:
             consecutive_network_errors = 0
 
         # 网络请求期间宿主资料可能被其他任务更新，重新读取再执行乐观写入。
         latest = context.actors.get(snapshot.actor_id)
-        if latest is None or latest.values.get("javdb_id") != javdb_id:
-            row.update(status="stopped", reason="actor_changed_or_deleted", next_attempt_at=None)
+        if latest is None or actor_identity_key(latest) != identity_key:
+            row.update(
+                status="stopped",
+                reason="actor_changed_or_deleted",
+                next_attempt_at=None,
+            )
             stats["stopped"] += 1
         else:
             allowed = writable_fields(latest, missing_fields(latest), owner)
             patch = {key: value for key, value in updates.items() if key in allowed}
             if patch:
-                if context.actors.patch(latest.actor_id, patch, expected_revision=latest.revision):
+                if context.actors.patch(
+                    latest.actor_id,
+                    patch,
+                    expected_revision=latest.revision,
+                ):
                     stats["updated"] += 1
-                    row["sources"].update({key: provenance[key] for key in patch})
+                    row["sources"].update({
+                        key: provenance[key] for key in patch
+                    })
                 else:
                     outcomes.append("patch_conflict")
                 latest = context.actors.get(snapshot.actor_id)
@@ -262,6 +266,9 @@ def process(
             if latest and not row["missing_fields"]:
                 row.update(status="completed", next_attempt_at=None, reason="complete")
                 stats["completed"] += 1
+            elif javbus_outcome in TERMINAL_OUTCOMES:
+                row.update(status="stopped", next_attempt_at=None)
+                stats["stopped"] += 1
             elif row["attempts"] >= settings.max_attempts:
                 row.update(status="stopped", next_attempt_at=None)
                 stats["stopped"] += 1
@@ -276,30 +283,29 @@ def process(
     return stats
 
 
-def run(context, settings, reporter, *, index=None):
+def run(context, settings, reporter):
     logger = context.get_task_logger("actor-metadata")
     logger.info("女优资料补全开始")
-    with portalocker.Lock(str(context.data_dir / "actor_metadata.lock"), mode="a", timeout=0):
+    with portalocker.Lock(
+        str(context.data_dir / "actor_metadata.lock"), mode="a", timeout=0
+    ):
         state = State(context.data_dir / "actor_metadata.sqlite3")
-        if state.requeued_count:
-            logger.info("资料来源升级，已重新入队 {} 位未补齐演员", state.requeued_count)
-        if index is None:
-            index_path = context.data_dir / "actress_index.sqlite3"
-            if seed_bundled_index(index_path):
-                logger.info("已载入插件内置女优索引")
-            index = ActressIndex(index_path)
         sources = Sources(settings)
         try:
             stats = process(
-                context, settings, state, sources, reporter,
-                logger=logger, index=index,
+                context,
+                settings,
+                state,
+                sources,
+                reporter,
+                logger=logger,
             )
         finally:
             sources.close()
     logger.info("女优资料补全完成 stats={}", stats)
     if stats["aborted"]:
         raise SourceError(
-            f"连续 {MAX_CONSECUTIVE_NETWORK_ERRORS} 位演员网络请求异常，本轮已停止；"
-            "当前演员状态已保存，未开始的演员不计次数"
+            f"连续 {MAX_CONSECUTIVE_NETWORK_ERRORS} 次网络请求异常或 JavBus 要求人机验证，"
+            "本轮已停止；当前演员状态已保存，未开始的演员不计次数"
         )
     return stats

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from src.plugins import PluginContext, PluginRegistration
+from src.plugins import HOST_API_VERSION, PluginContext, PluginRegistration
 from src.scheduler.contracts import JobDefinition
 
 from .jobs import run
@@ -19,12 +19,12 @@ def register(context: PluginContext) -> PluginRegistration:
         plugin_id=PLUGIN_ID,
         display_name="SakuraMedia 女优资料补全",
         version=VERSION,
-        host_api_version=6,
+        host_api_version=HOST_API_VERSION,
         jobs=(JobDefinition(
             task_key=PLUGIN_ID,
             log_name="actor-metadata",
             cli_name="actor-metadata",
-            cli_help="从 JavDB / MinnanoAV 补全女优资料",
+            cli_help="从 JavBus 补全女优资料",
             default_cron="0 5 * * *",
             handler=lambda reporter, _params: run(context, settings, reporter),
         ),),

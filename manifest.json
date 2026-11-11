@@ -1,8 +1,8 @@
 {
   "plugin_id": "sakuramedia_actor_metadata",
   "display_name": "SakuraMedia 女优资料补全",
-  "version": "0.0.4",
-  "host_api_version": 6,
+  "version": "0.1.0",
+  "host_api_version": 18,
   "settings_model": "Settings",
   "requires_python": ">=3.10,<3.11",
   "author": "tinypinglite",

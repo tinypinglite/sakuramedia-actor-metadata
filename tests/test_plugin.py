@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from sakuramedia_actor_metadata.plugin import PLUGIN_ID, register
-from sakuramedia_actor_metadata.settings import Settings
+from sakuramedia_actor_metadata.settings import PROFILE_FIELDS, Settings
 from sakuramedia_actor_metadata.tools.package_plugin import RUNTIME_FILES, build
 from src.plugins import PluginContext
 from src.plugins.manifest import load_manifest_from_dict
@@ -15,7 +15,7 @@ def test_registration_and_defaults_do_not_create_data(tmp_path):
     data_dir = tmp_path / "not-created"
     registration = register(PluginContext(PLUGIN_ID, {}, data_dir))
     assert not data_dir.exists()
-    assert registration.host_api_version == 6
+    assert registration.host_api_version == 18
     assert registration.jobs[0].task_key == PLUGIN_ID
     assert registration.jobs[0].default_cron == "0 5 * * *"
     assert registration.jobs[0].params_schema is None
@@ -36,11 +36,13 @@ def test_package_contains_only_runtime_files(tmp_path):
         assert set(z.namelist()) == set(RUNTIME_FILES)
         manifest = load_manifest_from_dict(json.loads(z.read("manifest.json")))
         assert manifest.plugin_id == PLUGIN_ID
-        assert manifest.host_api_version == 6
+        assert manifest.host_api_version == 18
         assert manifest.release_api_url == (
             "https://api.github.com/repos/tinypinglite/sakuramedia-actor-metadata/releases/latest"
         )
         assert "beautifulsoup4>=4.12,<5" in manifest.dependencies
+        assert "index.py" not in z.namelist()
+        assert "actress_index.json" not in z.namelist()
     assert Path(archive).stat().st_size > 0
 
 
@@ -77,3 +79,11 @@ def test_settings_schema_and_retired_field_configuration():
         "request_interval_seconds", "timeout_seconds",
     }
     assert schema["properties"]["retry_days"]["title"] == "重试间隔（天）"
+
+
+def test_profile_fields_match_javbus_capabilities():
+    assert PROFILE_FIELDS == (
+        "birthday", "height_cm", "bust_cm", "waist_cm",
+        "hips_cm", "cup", "birthplace",
+    )
+    assert "blood_type" not in PROFILE_FIELDS
