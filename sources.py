@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from .settings import PROFILE_FIELDS, Settings
 
 JAVBUS = "https://www.javbus.com"
-JAVBUS_REF = re.compile(r"/star/[A-Za-z0-9_-]+")
+JAVBUS_REF = re.compile(r"/(?:uncensored/)?star/[A-Za-z0-9_-]+")
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -48,10 +48,6 @@ class Profile:
 
 def normalize_name(value):
     return "".join(unicodedata.normalize("NFKC", value or "").casefold().split())
-
-
-def unqualified_name(value):
-    return re.split(r"[（(]", value or "", maxsplit=1)[0].strip()
 
 
 def normalize_fields(values):
@@ -115,11 +111,11 @@ def parse_star_page(html: str, ref: str, names) -> Profile:
         return Profile(ref=ref, outcome="not_found")
 
     expected = {
-        normalize_name(unqualified_name(name))
+        normalize_name(name)
         for name in names
         if isinstance(name, str) and name.strip()
     }
-    if normalize_name(unqualified_name(page_name)) not in expected:
+    if normalize_name(page_name) not in expected:
         return Profile(names=(page_name,), ref=ref, outcome="identity_mismatch")
 
     values = {}
@@ -141,7 +137,7 @@ def parse_star_page(html: str, ref: str, names) -> Profile:
 def parse_search_page(html: str, names) -> dict[str, str]:
     soup = BeautifulSoup(html, "html.parser")
     expected = {
-        normalize_name(unqualified_name(name))
+        normalize_name(name)
         for name in names
         if isinstance(name, str) and name.strip()
     }
@@ -156,7 +152,7 @@ def parse_search_page(html: str, names) -> dict[str, str]:
         ref = star_ref(link.get("href") or "")
         if (
             ref
-            and normalize_name(unqualified_name(candidate_name)) in expected
+            and normalize_name(candidate_name) in expected
         ):
             found[ref] = candidate_name
     return found
@@ -193,20 +189,15 @@ class Sources:
             raise SourceError(f"javbus:http_{response.status_code}")
         return response
 
-    def _search(self, names) -> tuple[str, str]:
+    def _search(self, names) -> list[str]:
         for name in names[:3]:
-            response = self._get(
-                f"{JAVBUS}/searchstar/{quote(unqualified_name(name), safe='')}"
-            )
+            response = self._get(f"{JAVBUS}/searchstar/{quote(name, safe='')}")
             if response is None:
                 continue
             found = parse_search_page(response.text, names)
-            if len(found) > 1:
-                return "", "ambiguous"
             if found:
-                ref = next(iter(found))
-                return ref, "ok"
-        return "", "not_found"
+                return list(found)
+        return []
 
     def javbus(self, names, ref: str = "") -> Profile:
         names = tuple(
@@ -216,19 +207,28 @@ class Sources:
                 if isinstance(name, str) and name.strip()
             )
         )
+        best = None
         if ref:
             if not JAVBUS_REF.fullmatch(ref):
                 raise SourceError("javbus:invalid_ref")
             response = self._get(JAVBUS + ref)
             if response is not None:
                 profile = parse_star_page(response.text, ref, names)
-                if profile.outcome != "identity_mismatch":
+                if profile.fields:
                     return profile
+                if profile.outcome != "identity_mismatch":
+                    best = profile
 
-        ref, outcome = self._search(names)
-        if not ref:
-            return Profile(outcome=outcome)
-        response = self._get(JAVBUS + ref)
-        if response is None:
-            return Profile(ref=ref, outcome="not_found")
-        return parse_star_page(response.text, ref, names)
+        # 同名条目可能有多个，逐个打开取资料最全的那个。
+        for candidate in self._search(names):
+            if candidate == ref:
+                continue
+            response = self._get(JAVBUS + candidate)
+            if response is None:
+                continue
+            profile = parse_star_page(response.text, candidate, names)
+            if profile.outcome == "identity_mismatch":
+                continue
+            if best is None or len(profile.fields) > len(best.fields):
+                best = profile
+        return best or Profile(outcome="not_found")

@@ -5,7 +5,15 @@ import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# 2 -> 3：搜索与同名选页规则变了，旧版本判定的这些终态不再可信。
+RETRY_REASONS = (
+    "javbus:ambiguous",
+    "javbus:not_found",
+    "javbus:identity_mismatch",
+    "javbus:empty_profile",
+)
 
 
 class State:
@@ -15,7 +23,7 @@ class State:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version < SCHEMA_VERSION:
+            if version < 2:
                 # 资料来源和身份键都已变化，旧重试状态不再有复用价值。
                 db.execute("DROP TABLE IF EXISTS actors")
             db.execute("""
@@ -32,8 +40,20 @@ class State:
                     sources TEXT NOT NULL DEFAULT '{}'
                 )
             """)
-            if version < SCHEMA_VERSION:
-                db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if version == 2:
+                self._requeue_terminal_rows(db)
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @staticmethod
+    def _requeue_terminal_rows(db):
+        """把旧版本因搜索/选页规则判死的演员放回队列，升级后重跑一次。"""
+        clause = " OR ".join("reason LIKE ?" for _ in RETRY_REASONS)
+        db.execute(
+            f"UPDATE actors SET status='waiting', attempts=0,"
+            f" next_attempt_at=NULL, reason=''"
+            f" WHERE status='stopped' AND ({clause})",
+            [f"%{reason}%" for reason in RETRY_REASONS],
+        )
 
     @contextmanager
     def connect(self):

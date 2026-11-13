@@ -71,6 +71,7 @@ def test_normalization_only_returns_javbus_fields():
 def test_star_ref_only_accepts_javbus_star_urls():
     assert star_ref("https://www.javbus.com/star/2xi") == "/star/2xi"
     assert star_ref("/star/w5a") == "/star/w5a"
+    assert star_ref("https://www.javbus.com/uncensored/star/6ur") == "/uncensored/star/6ur"
     assert star_ref("https://example.com/star/2xi") == ""
     assert star_ref("https://www.javbus.com/actor/2xi") == ""
 
@@ -116,6 +117,30 @@ def test_parse_search_page_requires_exact_normalized_name():
     <a class="avatar-box" href="/star/other"><span class="mleft">葵つかさ別</span></a>
     """
     assert parse_search_page(html, ["葵つかさ"]) == {"/star/2xi": "葵 つかさ"}
+
+
+def test_wrapped_name_is_searched_verbatim():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, text="<html></html>")
+
+    source = client(handler)
+    profile = source.javbus(["（上原結衣）"])
+
+    assert profile.outcome == "not_found"
+    assert seen == ["/searchstar/（上原結衣）"]
+
+
+def test_parse_search_page_matches_full_parenthesized_name():
+    html = """
+    <a class="avatar-box" href="/star/2gj"><span class="mleft">楓乃々花（朝倉夢）<button>有碼</button></span></a>
+    <a class="avatar-box" href="/star/other"><span class="mleft">楓乃々花</span></a>
+    """
+    assert parse_search_page(html, ["楓乃々花（朝倉夢）"]) == {
+        "/star/2gj": "楓乃々花（朝倉夢）"
+    }
 
 
 def test_search_then_fetch_profile():
@@ -169,17 +194,60 @@ def test_stale_ref_falls_back_to_search():
     assert seen == ["/star/old", "/searchstar/葵つかさ", "/star/2xi"]
 
 
-def test_ambiguous_exact_results_are_not_guessed():
-    html = """
-    <a class="avatar-box" href="/star/one"><span class="mleft">同名</span></a>
-    <a class="avatar-box" href="/star/two"><span class="mleft">同名</span></a>
+def test_duplicate_names_pick_the_entry_with_data():
+    search_html = """
+    <a class="avatar-box" href="/star/empty"><span class="mleft">同名</span></a>
+    <a class="avatar-box" href="/uncensored/star/full"><span class="mleft">同名</span></a>
     """
+    empty_html = """
+    <div class="avatar-box"><div class="photo-info">
+      <span class="pb10">同名</span>
+    </div></div>
+    """
+    full_html = """
+    <div class="avatar-box"><div class="photo-info">
+      <span class="pb10">同名</span>
+      <p>身高: 163cm</p>
+    </div></div>
+    """
+    seen = []
 
-    source = client(lambda request: httpx.Response(200, text=html))
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path.startswith("/searchstar/"):
+            return httpx.Response(200, text=search_html)
+        if request.url.path == "/star/empty":
+            return httpx.Response(200, text=empty_html)
+        return httpx.Response(200, text=full_html)
+
+    source = client(handler)
     profile = source.javbus(["同名"])
 
-    assert profile.outcome == "ambiguous"
-    assert profile.ref == ""
+    assert profile.outcome == "ok"
+    assert profile.ref == "/uncensored/star/full"
+    assert profile.fields == {"height_cm": 163}
+    assert seen == ["/searchstar/同名", "/star/empty", "/uncensored/star/full"]
+
+
+def test_cached_uncensored_ref_is_accepted():
+    html = """
+    <div class="avatar-box"><div class="photo-info">
+      <span class="pb10">同名</span>
+    </div></div>
+    """
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, text=html)
+
+    source = client(handler)
+    profile = source.javbus(["同名"], "/uncensored/star/6ur")
+
+    assert profile.outcome == "empty_profile"
+    assert profile.ref == "/uncensored/star/6ur"
+    # 缓存页没有资料时会再搜一次，看有没有资料更全的同名条目。
+    assert seen == ["/uncensored/star/6ur", "/searchstar/同名"]
 
 
 def test_missing_name_returns_not_found():
